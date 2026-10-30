@@ -65,9 +65,9 @@ function generateVerificationUrl(metadata) {
     }
 }
 
-// Canonical hash calculation
-function createDataHash(metadata) {
-    const canonical = {
+// Canonical metadata + hash calculation
+function canonicalizeMetadata(metadata) {
+    return {
         certificateId: metadata.certificateId.trim(),
         studentName: metadata.studentName.trim(),
         studentId: metadata.studentId.trim(),
@@ -75,8 +75,15 @@ function createDataHash(metadata) {
         institution: metadata.institution.trim(),
         year: metadata.year.trim()
     };
+}
+
+function createMetadataJson(metadata) {
+    return JSON.stringify(canonicalizeMetadata(metadata));
+}
+
+function createDataHash(metadata) {
     return ethers.keccak256(
-        ethers.toUtf8Bytes(JSON.stringify(canonical))
+        ethers.toUtf8Bytes(createMetadataJson(metadata))
     );
 }
 
@@ -249,6 +256,20 @@ function Navbar({ account, onConnect, isOwner, isIssuer, networkInfo, onSwitchNe
         ? `${account.substring(0, 6)}...${account.substring(account.length - 4)}`
         : "";
 
+    function clearCache() {
+        if (!window.confirm("Clear all locally cached CertiChain data? This does not affect the blockchain.")) {
+            return;
+        }
+        try {
+            Object.keys(localStorage)
+                .filter(key => key.startsWith("certichain_"))
+                .forEach(key => localStorage.removeItem(key));
+        } catch (error) {
+            console.warn("Could not clear cache", error);
+        }
+        window.location.reload();
+    }
+
     return (
         <header className="navbar">
             <div className="nav-content">
@@ -263,6 +284,15 @@ function Navbar({ account, onConnect, isOwner, isIssuer, networkInfo, onSwitchNe
                 </Link>
 
                 <div className="nav-actions">
+                    <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={clearCache}
+                        title="Clear cached CertiChain history and certificate data"
+                    >
+                        <Trash2 size={14} />
+                        <span>Clear Cache</span>
+                    </button>
+
                     {/* Network status pill */}
                     {networkInfo.chainId !== null && (
                         <div
@@ -359,6 +389,14 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
     const [issuanceFee, setIssuanceFee] = useState(null);
     const [copiedLink, setCopiedLink] = useState(false);
 
+    // Student-pays request flow
+    const [studentPays, setStudentPays] = useState(false);
+    const [studentWallet, setStudentWallet] = useState("");
+    const [claimFeeEth, setClaimFeeEth] = useState("0");
+    const [claimId, setClaimId] = useState("");
+    const [claimRequest, setClaimRequest] = useState(null);
+    const [claimBusy, setClaimBusy] = useState(false);
+
     const navigate = useNavigate();
 
     // Load recent certificates history from localStorage
@@ -423,6 +461,13 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
         year: year || "2026"
     }), [certificateId, studentName, studentId, program, institution, year]);
 
+    const claimWalletMismatch = Boolean(
+        claimRequest &&
+        claimRequest.student !== ethers.ZeroAddress &&
+        account &&
+        claimRequest.student.toLowerCase() !== account.toLowerCase()
+    );
+
     // Issue Certificate Handler
     async function handleIssueCertificate(e) {
         e.preventDefault();
@@ -443,6 +488,7 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
             };
 
             const dataHash = createDataHash(metadata);
+            const metadataJson = createMetadataJson(metadata);
 
             showToast({
                 type: "info",
@@ -452,6 +498,51 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
 
             const contract = await getWriteContract();
             await assertAuthorizedIssuer(contract);
+
+            if (studentPays) {
+                if (!studentWallet.trim()) {
+                    throw new Error("Student wallet address is required when the student must pay.");
+                }
+                if (!ethers.isAddress(studentWallet.trim())) {
+                    throw new Error("Invalid student wallet address.");
+                }
+                const studentAddress = studentWallet.trim();
+
+                let claimFee = 0n;
+                try {
+                    claimFee = ethers.parseEther((claimFeeEth || "0").trim());
+                } catch {
+                    throw new Error("Invalid claim fee amount.");
+                }
+
+                const requestTx = await contract.createCertificateRequest(
+                    metadata.certificateId,
+                    dataHash,
+                    studentAddress,
+                    claimFee,
+                    metadataJson
+                );
+
+                showToast({
+                    type: "info",
+                    title: "Request Broadcast",
+                    message: "Awaiting confirmation on the Ethereum blockchain..."
+                });
+
+                await requestTx.wait();
+
+                localStorage.setItem(
+                    getMetadataKey(metadata.certificateId),
+                    JSON.stringify(metadata)
+                );
+
+                showToast({
+                    type: "success",
+                    title: "Payment Request Created",
+                    message: `${metadata.certificateId} is pending. The student can pay ${ethers.formatEther(claimFee)} ETH in the Claim tab.`
+                });
+                return;
+            }
 
             let fee = 0n;
             try {
@@ -464,6 +555,7 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
             const tx = await contract.issueCertificate(
                 metadata.certificateId,
                 dataHash,
+                metadataJson,
                 { value: fee }
             );
 
@@ -566,6 +658,96 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
         }
     }
 
+    // Look up a pending certificate payment request
+    async function handleCheckClaim(e) {
+        e.preventDefault();
+        if (!claimId.trim()) return;
+
+        setClaimBusy(true);
+        setClaimRequest(null);
+        try {
+            const contract = await getReadContract();
+            const result = await contract.getCertificateRequest(claimId.trim());
+
+            if (!result.pending && !result.exists) {
+                throw new Error("No certificate request found for this ID.");
+            }
+
+            setClaimRequest({
+                certificateId: claimId.trim(),
+                dataHash: result.dataHash,
+                issuer: result.issuer,
+                student: result.student,
+                claimFee: result.claimFee,
+                pending: result.pending,
+                exists: result.exists,
+                revoked: result.revoked
+            });
+        } catch (error) {
+            console.error("Claim lookup error", error);
+            showToast({
+                type: "error",
+                title: "Lookup Failed",
+                message: describeContractError(error) || "Could not load certificate request"
+            });
+        } finally {
+            setClaimBusy(false);
+        }
+    }
+
+    // Student pays the claim fee and activates the certificate
+    async function handleClaimCertificate() {
+        if (!claimRequest || !claimRequest.pending) return;
+
+        setClaimBusy(true);
+        try {
+            const contract = await getWriteContract();
+            const signerAddress = await contract.runner.getAddress();
+
+            if (
+                claimRequest.student !== ethers.ZeroAddress &&
+                claimRequest.student.toLowerCase() !== signerAddress.toLowerCase()
+            ) {
+                throw new Error("This certificate request is assigned to a different student wallet.");
+            }
+
+            showToast({
+                type: "info",
+                title: "MetaMask Prompt",
+                message: `Confirm payment of ${ethers.formatEther(claimRequest.claimFee)} ETH to claim the certificate...`
+            });
+
+            const tx = await contract.claimCertificate(claimRequest.certificateId, {
+                value: claimRequest.claimFee
+            });
+
+            showToast({
+                type: "info",
+                title: "Payment Broadcast",
+                message: "Awaiting blockchain confirmation..."
+            });
+
+            await tx.wait();
+
+            setClaimRequest(current => current ? { ...current, pending: false, exists: true } : current);
+
+            showToast({
+                type: "success",
+                title: "Certificate Claimed!",
+                message: `${claimRequest.certificateId} is now issued and verified on-chain.`
+            });
+        } catch (error) {
+            console.error("Claim error", error);
+            showToast({
+                type: "error",
+                title: "Claim Failed",
+                message: describeContractError(error) || "Could not claim certificate"
+            });
+        } finally {
+            setClaimBusy(false);
+        }
+    }
+
     // Copy Verification Link
     function copyIssuedUrl(url) {
         navigator.clipboard.writeText(url);
@@ -617,6 +799,13 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
                 >
                     <Search size={16} />
                     <span>Verify Credential</span>
+                </button>
+                <button
+                    className={`tab-btn ${activeTab === "claim" ? "active" : ""}`}
+                    onClick={() => setActiveTab("claim")}
+                >
+                    <Wallet size={16} />
+                    <span>Claim</span>
                 </button>
                 <button
                     className={`tab-btn ${activeTab === "history" ? "active" : ""}`}
@@ -749,6 +938,51 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
 
                             <div
                                 style={{
+                                    marginTop: "16px",
+                                    padding: "12px",
+                                    borderRadius: "8px",
+                                    background: "rgba(255, 255, 255, 0.03)",
+                                    border: "1px solid rgba(255, 255, 255, 0.08)"
+                                }}
+                            >
+                                <label style={{ display: "flex", alignItems: "center", gap: "8px", cursor: "pointer", fontSize: "13px", color: "#e2e8f0" }}>
+                                    <input
+                                        type="checkbox"
+                                        checked={studentPays}
+                                        onChange={e => setStudentPays(e.target.checked)}
+                                        style={{ width: "auto", margin: 0 }}
+                                    />
+                                    Require student to pay &amp; claim
+                                </label>
+
+                                {studentPays && (
+                                    <div className="form-grid" style={{ marginTop: "12px" }}>
+                                        <div className="form-group">
+                                            <label>Student Wallet (optional)</label>
+                                            <input
+                                                type="text"
+                                                value={studentWallet}
+                                                onChange={e => setStudentWallet(e.target.value)}
+                                                placeholder="0x... (blank = any wallet)"
+                                            />
+                                        </div>
+                                        <div className="form-group">
+                                            <label>Claim Fee (ETH, paid to you as issuer)</label>
+                                            <input
+                                                type="number"
+                                                min="0"
+                                                step="0.0001"
+                                                value={claimFeeEth}
+                                                onChange={e => setClaimFeeEth(e.target.value)}
+                                                placeholder="e.g. 0.05"
+                                            />
+                                        </div>
+                                    </div>
+                                )}
+                            </div>
+
+                            <div
+                                style={{
                                     display: "flex",
                                     justifyContent: "space-between",
                                     alignItems: "center",
@@ -760,9 +994,17 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
                                     fontSize: "13px"
                                 }}
                             >
-                                <span style={{ color: "#94a3b8" }}>Issuance fee (paid to university)</span>
+                                <span style={{ color: "#94a3b8" }}>
+                                    {issuanceFee !== null && issuanceFee > 0n
+                                        ? "Issuance fee (paid to university)"
+                                        : "Issuance fee"}
+                                </span>
                                 <strong style={{ color: "#38bdf8" }}>
-                                    {issuanceFee === null ? "Loading..." : `${ethers.formatEther(issuanceFee)} ETH`}
+                                    {issuanceFee === null
+                                        ? "Loading..."
+                                        : issuanceFee > 0n
+                                            ? `${ethers.formatEther(issuanceFee)} ETH`
+                                            : "None — gas only"}
                                 </strong>
                             </div>
 
@@ -896,6 +1138,139 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
                                     </button>
                                 ))}
                             </div>
+                        </div>
+                    )}
+                </div>
+            )}
+
+            {/* CLAIM TAB: STUDENT PAYMENT */}
+            {activeTab === "claim" && (
+                <div className="glass-card" style={{ maxWidth: "680px", margin: "0 auto" }}>
+                    <div className="card-header">
+                        <div className="card-title-group">
+                            <div className="card-title-icon">
+                                <Wallet size={20} />
+                            </div>
+                            <div>
+                                <h3>Claim Certificate</h3>
+                                <p>Pay the required fee to activate a pending credential</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <form onSubmit={handleCheckClaim}>
+                        <div className="form-group">
+                            <label>Certificate Unique ID</label>
+                            <div className="input-with-action">
+                                <input
+                                    type="text"
+                                    value={claimId}
+                                    onChange={e => setClaimId(e.target.value)}
+                                    placeholder="e.g. CERT-2026-8812"
+                                    required
+                                />
+                                <button type="submit" className="btn btn-primary" disabled={claimBusy}>
+                                    <Search size={16} /> Check
+                                </button>
+                            </div>
+                        </div>
+                    </form>
+
+                    {claimRequest && (
+                        <div
+                            style={{
+                                marginTop: "20px",
+                                padding: "16px",
+                                borderRadius: "10px",
+                                background: "rgba(255, 255, 255, 0.03)",
+                                border: "1px solid rgba(255, 255, 255, 0.08)"
+                            }}
+                        >
+                            <div className="detail-row">
+                                <span className="detail-label">Status</span>
+                                <span className="detail-value">
+                                    {claimRequest.exists ? "Issued" : claimRequest.pending ? "Pending payment" : "Unavailable"}
+                                </span>
+                            </div>
+                            <div className="detail-row">
+                                <span className="detail-label">Claim Fee</span>
+                                <span className="detail-value">{ethers.formatEther(claimRequest.claimFee)} ETH</span>
+                            </div>
+                            <div className="detail-row">
+                                <span className="detail-label">Assigned Student</span>
+                                <span className="detail-value mono">
+                                    {claimRequest.student === ethers.ZeroAddress ? "Any wallet" : claimRequest.student}
+                                </span>
+                            </div>
+                            <div className="detail-row">
+                                <span className="detail-label">Issuer</span>
+                                <span className="detail-value mono">{claimRequest.issuer}</span>
+                            </div>
+                            <div className="detail-row">
+                                <span className="detail-label">Connected Wallet</span>
+                                <span className="detail-value mono">{account || "Not connected"}</span>
+                            </div>
+
+                            {claimRequest.pending && claimRequest.claimFee > 0n && (
+                                <p style={{ color: "var(--text-muted)", fontSize: "13px", marginTop: "10px" }}>
+                                    The claim fee is paid directly to the issuer account shown above.
+                                </p>
+                            )}
+
+                            {claimRequest.pending && claimWalletMismatch && (
+                                <p style={{ color: "#f59e0b", fontSize: "13px", marginTop: "10px" }}>
+                                    Wrong wallet. Switch MetaMask to the assigned student account: {claimRequest.student}
+                                </p>
+                            )}
+
+                            {claimRequest.pending ? (
+                                !account ? (
+                                    <button
+                                        type="button"
+                                        className="btn btn-primary btn-block"
+                                        style={{ marginTop: "16px" }}
+                                        onClick={onConnect}
+                                    >
+                                        <Wallet size={16} />
+                                        <span>Connect Wallet to Claim</span>
+                                    </button>
+                                ) : claimWalletMismatch ? (
+                                    <button
+                                        type="button"
+                                        className="btn btn-secondary btn-block"
+                                        style={{ marginTop: "16px" }}
+                                        disabled
+                                    >
+                                        <AlertTriangle size={16} />
+                                        <span>Wrong Wallet — Switch Account</span>
+                                    </button>
+                                ) : (
+                                    <button
+                                        type="button"
+                                        className="btn btn-primary btn-block"
+                                        style={{ marginTop: "16px" }}
+                                        onClick={handleClaimCertificate}
+                                        disabled={claimBusy}
+                                    >
+                                        {claimBusy ? <RefreshCw className="animate-spin" size={16} /> : <Wallet size={16} />}
+                                        <span>
+                                            {claimBusy
+                                                ? "Processing..."
+                                                : `Pay ${ethers.formatEther(claimRequest.claimFee)} ETH & Claim`}
+                                        </span>
+                                    </button>
+                                )
+                            ) : claimRequest.exists ? (
+                                <button
+                                    type="button"
+                                    className="btn btn-secondary btn-block"
+                                    style={{ marginTop: "16px" }}
+                                    onClick={() => navigate(`/verify/${encodeURIComponent(claimRequest.certificateId)}`)}
+                                >
+                                    <ExternalLink size={16} />
+                                    <span>View Certificate</span>
+                                </button>
+                            ) : null}
                         </div>
                     )}
                 </div>
@@ -1155,15 +1530,24 @@ function VerifyPage({ showToast }) {
                 if (!active) return;
 
                 if (!result.exists) {
-                    setStatus("NOT_FOUND");
                     setCertificate(null);
+                    setStatus(result.pending ? "PENDING_PAYMENT" : "NOT_FOUND");
                     return;
                 }
 
-                // Check for metadata in URL query param 'd' (for universal QR scanning)
+                // Prefer metadata stored on-chain so it works on any browser/device
                 let localMetadata = null;
+                if (result.metadata) {
+                    try {
+                        localMetadata = JSON.parse(result.metadata);
+                    } catch (e) {
+                        console.warn("Failed to parse on-chain metadata", e);
+                    }
+                }
+
+                // Fallback to metadata in URL query param 'd' (for universal QR scanning)
                 const encodedData = searchParams.get("d");
-                if (encodedData) {
+                if (!localMetadata && encodedData) {
                     try {
                         localMetadata = JSON.parse(decodeURIComponent(atob(encodedData)));
                     } catch (e) {
@@ -1290,6 +1674,18 @@ function VerifyPage({ showToast }) {
                             <div className="status-badge-title">CERTIFICATE NOT FOUND</div>
                             <p style={{ color: "#fef3c7", marginTop: "6px", fontSize: "14px" }}>
                                 No cryptographic record exists on the blockchain for Certificate ID: "{id}".
+                            </p>
+                        </div>
+                    )}
+
+                    {status === "PENDING_PAYMENT" && (
+                        <div className="verification-status-banner invalid">
+                            <div style={{ display: "inline-flex", padding: "12px", background: "rgba(245, 158, 11, 0.2)", borderRadius: "50%", color: "#f59e0b" }}>
+                                <AlertTriangle size={40} />
+                            </div>
+                            <div className="status-badge-title">AWAITING STUDENT PAYMENT</div>
+                            <p style={{ color: "#fef3c7", marginTop: "6px", fontSize: "14px" }}>
+                                This certificate request exists but is not active yet. The student must pay the claim fee in the Claim tab.
                             </p>
                         </div>
                     )}

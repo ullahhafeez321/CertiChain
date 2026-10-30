@@ -161,7 +161,7 @@ npx ganache --port 8545 --chainId 1337
    * **Graduation Year:** e.g. `2026`
    * **Certificate Unique ID:** Click **Auto-Generate** or type a custom ID (e.g. `CERT-2026-8812`).
 3. Notice the **Live Credential Preview** on the right side updating in real-time as you type!
-4. The form shows the on-chain **issuance fee** (default `0.01 ETH`, paid to the contract owner). Change it with `FEE=0.05 npm run fee`.
+4. Issuance has **no certificate fee by default** — authorized issuers only pay gas. The owner can optionally enable a fee with `FEE=0.05 npm run fee`.
 5. Click **Issue & Mint Certificate**.
 6. MetaMask will pop up requesting transaction approval. Click **Confirm**.
 7. When mined:
@@ -172,6 +172,18 @@ npx ganache --port 8545 --chainId 1337
    * Click **Copy Verification URL** to copy the public link.
    * Click **Print / Save Credential** to print or export as PDF.
    * Click **Open Verification Page** to inspect the public record.
+
+---
+
+### 2b. Student-Paid Certificates
+
+1. In the **Issue Certificate** tab, enable **Require student to pay & claim**.
+2. Enter the student's wallet address (required) and a **Claim Fee** in ETH.
+3. Submit the form. This creates a **pending** certificate request; it is not valid yet.
+4. The student goes to the **Claim** tab, enters the Certificate ID, clicks **Check**, then **Pay & Claim**.
+5. The claim fee is paid directly to the **issuer account** that created the request, and the certificate becomes valid on-chain.
+
+Only the assigned student wallet can claim the certificate.
 
 ---
 

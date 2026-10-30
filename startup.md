@@ -71,9 +71,16 @@ Any Ganache account can issue certificates because the deploy script authorizes 
 2. Fill in the details and click **Issue & Mint Certificate**.
 3. Confirm in MetaMask.
 
-Each issuance costs the on-chain fee (default `0.01 ETH` paid to the contract owner) plus gas.
+By default there is **no certificate fee** — issuers only pay gas.
 
-Change the fee:
+To make the student pay:
+1. In **Issue Certificate**, enable **Require student to pay & claim**.
+2. Enter the student wallet (required) and the claim fee.
+3. Submit to create a pending request.
+4. Student opens the **Claim** tab, enters the Certificate ID, and clicks **Pay & Claim**.
+5. The claim fee is sent directly to the issuer account that created the request.
+
+Optionally enable a per-certificate fee paid by the issuer to the contract owner:
 
 ```bash
 FEE=0.05 npm run fee
@@ -100,7 +107,7 @@ Then refresh the website. Old certificates will no longer exist on-chain.
 ```bash
 npm run deploy      # compile is separate; deploys and authorizes accounts
 npm run authorize   # authorize another address: ISSUER=0x... npm run authorize
-npm run fee         # set issuance fee: FEE=0.05 npm run fee
+npm run fee         # optional fee: FEE=0.05 npm run fee (0 by default)
 cd frontend && npm run dev      # start website
 cd frontend && npm run build    # production build
 ```
@@ -120,4 +127,4 @@ cd frontend && npm run build    # production build
 - They are only local browser history. Click **Clear History** in the History tab.
 
 **MetaMask shows ~1,000 ETH after a transaction**
-- That is Ganache's starting balance rounded by MetaMask. Only the fee and gas are deducted.
+- That is Ganache's starting balance rounded by MetaMask. Only gas (and any optional fee) is deducted.
