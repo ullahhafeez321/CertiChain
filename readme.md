@@ -84,13 +84,15 @@ npx ganache --port 8545 --chainId 1337
 4. Click **Save** and switch to **Ganache Local**.
 
 #### Import a Funded Ganache Account into MetaMask:
-1. In your Ganache terminal or GUI, copy the **Private Key** of Account (0).
+1. In your Ganache terminal or GUI, copy the **Private Key** of any account (Account 0, 1, 2, ...).
    * In Ganache CLI: Look for `Private Keys` listed in the terminal.
-   * In Ganache GUI: Click the key icon (🔑) next to the first account and copy the private key.
+   * In Ganache GUI: Click the key icon (🔑) next to the account and copy the private key.
 2. In MetaMask:
    * Click your account avatar > **Add account or hardware wallet** > **Import account**.
    * Paste the copied Private Key and click **Import**.
    * Your account will now display 100 test ETH.
+
+> The deploy script authorizes every unlocked Ganache account as an issuer, so any imported Ganache account can issue certificates. To authorize a different address later, run `npm run authorize` with `ISSUER=0xYourAddress`.
 
 ---
 
@@ -108,10 +110,10 @@ npx ganache --port 8545 --chainId 1337
 
 3. Deploy the contract to Ganache:
    ```bash
-   node scripts/deploy.js
+   npm run deploy
    ```
 
-> **Note:** The deployment script automatically copies the newly deployed contract address and ABI into `frontend/src/contract.json`!
+> **Note:** The deployment script automatically authorizes all Ganache accounts as certificate issuers and copies the newly deployed contract address and ABI into `frontend/src/contract.json`!
 
 ---
 
@@ -144,7 +146,7 @@ npx ganache --port 8545 --chainId 1337
 1. Open `http://localhost:5173/` in your browser.
 2. If MetaMask is already connected, CertiChain automatically detects your account and shows a **● Connected** pill with your shortened address.
 3. If not connected, click **Connect Wallet** in the top-right navbar and approve in MetaMask.
-4. If your wallet deployed the contract, an **Admin** badge will display next to your address.
+4. If your wallet deployed the contract, an **Admin** badge will display next to your address. Other authorized Ganache accounts show an **Issuer** badge and can also issue certificates.
 5. If MetaMask is on the wrong network, click the yellow/red pill to switch to **Ganache (1337)** automatically.
 
 ---
@@ -159,9 +161,10 @@ npx ganache --port 8545 --chainId 1337
    * **Graduation Year:** e.g. `2026`
    * **Certificate Unique ID:** Click **Auto-Generate** or type a custom ID (e.g. `CERT-2026-8812`).
 3. Notice the **Live Credential Preview** on the right side updating in real-time as you type!
-4. Click **Issue & Mint Certificate**.
-5. MetaMask will pop up requesting transaction approval. Click **Confirm**.
-6. When mined:
+4. The form shows the on-chain **issuance fee** (default `0.01 ETH`, paid to the contract owner). Change it with `FEE=0.05 npm run fee`.
+5. Click **Issue & Mint Certificate**.
+6. MetaMask will pop up requesting transaction approval. Click **Confirm**.
+7. When mined:
    * A celebratory **Success Modal** appears displaying:
      * High-resolution QR code
      * Complete on-chain transaction hash

@@ -25,8 +25,27 @@ async function main() {
     await contract.waitForDeployment();
 
     const address = await contract.getAddress();
+    const ownerAddress = (await signer.getAddress()).toLowerCase();
 
     console.log("CertiChain deployed at:", address);
+
+    // Authorize every unlocked Ganache account as an issuer so any account
+    // imported into MetaMask from this Ganache instance can issue certificates.
+    const accounts = await provider.listAccounts();
+    for (const accountSigner of accounts) {
+        const accountAddress = await accountSigner.getAddress();
+        if (accountAddress.toLowerCase() === ownerAddress) continue;
+
+        try {
+            const tx = await contract
+                .connect(signer)
+                .authorizeIssuer(accountAddress, true);
+            await tx.wait();
+            console.log("Authorized issuer:", accountAddress);
+        } catch (error) {
+            console.warn("Could not authorize", accountAddress, error.message);
+        }
+    }
 
     // Save the contract address and ABI for the React website.
     const output = {

@@ -35,11 +35,14 @@ const CONTRACT_ABI = contractInfo.abi;
 const GANACHE_CHAIN_ID_HEX = "0x539"; // 1337
 const GANACHE_CHAIN_ID_NUM = 1337;
 
-// Storage keys
+// Storage keys are namespaced by contract address so a redeploy starts fresh
+// instead of showing certificates from a previous contract deployment.
+const STORAGE_NAMESPACE = (CONTRACT_ADDRESS || "unknown").toLowerCase();
+
 function getMetadataKey(id) {
-    return `certichain_${id.trim()}`;
+    return `certichain_${STORAGE_NAMESPACE}_${id.trim()}`;
 }
-const HISTORY_STORAGE_KEY = "certichain_issued_history";
+const HISTORY_STORAGE_KEY = `certichain_issued_history_${STORAGE_NAMESPACE}`;
 
 // Helper for verification URL (robust for localhost, LAN, and __KALI_IP__)
 function generateVerificationUrl(metadata) {
@@ -135,6 +138,39 @@ async function getWriteContract() {
     return new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer);
 }
 
+// Fail fast with a clear message when the connected wallet is not allowed to issue.
+async function assertAuthorizedIssuer(contract) {
+    let signerAddress;
+    try {
+        signerAddress = await contract.runner.getAddress();
+    } catch {
+        return;
+    }
+
+    let allowed = true;
+    try {
+        allowed = await contract.isIssuer(signerAddress);
+    } catch {
+        // Older contract without isIssuer(); let the transaction surface any error.
+        return;
+    }
+
+    if (!allowed) {
+        throw new Error(
+            `Wallet ${signerAddress.slice(0, 6)}...${signerAddress.slice(-4)} is not an authorized issuer. ` +
+            "Authorize it with the contract owner (npm run authorize) or use the deployer account."
+        );
+    }
+}
+
+function describeContractError(error) {
+    const message = error?.shortMessage || error?.reason || error?.message || "Transaction failed";
+    if (/missing revert data/i.test(message)) {
+        return "Transaction reverted on-chain. Make sure this wallet is an authorized issuer and the certificate ID does not already exist.";
+    }
+    return message;
+}
+
 // Switch to Ganache network helper
 async function requestSwitchToGanache() {
     if (!window.ethereum) return;
@@ -199,7 +235,7 @@ class ErrorBoundary extends React.Component {
 }
 
 // ---------------- HEADER / NAVBAR COMPONENT ----------------
-function Navbar({ account, onConnect, isOwner, networkInfo, onSwitchNetwork }) {
+function Navbar({ account, onConnect, isOwner, isIssuer, networkInfo, onSwitchNetwork }) {
     const [copied, setCopied] = useState(false);
 
     function copyAddress() {
@@ -249,7 +285,11 @@ function Navbar({ account, onConnect, isOwner, networkInfo, onSwitchNetwork }) {
                             <div className="wallet-linked">
                                 <span className="network-dot" style={{ background: "#38bdf8", boxShadow: "0 0 8px #38bdf8" }} />
                                 <span className="wallet-address" title={account}>{shortAddress}</span>
-                                {isOwner && <span className="admin-badge">Admin</span>}
+                                {isOwner ? (
+                                    <span className="admin-badge">Admin</span>
+                                ) : isIssuer ? (
+                                    <span className="admin-badge">Issuer</span>
+                                ) : null}
                             </div>
                             <button
                                 className="btn-icon-subtle"
@@ -316,6 +356,7 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
     const [issuedCert, setIssuedCert] = useState(null);
     const [busy, setBusy] = useState(false);
     const [historyList, setHistoryList] = useState([]);
+    const [issuanceFee, setIssuanceFee] = useState(null);
     const [copiedLink, setCopiedLink] = useState(false);
 
     const navigate = useNavigate();
@@ -323,6 +364,8 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
     // Load recent certificates history from localStorage
     useEffect(() => {
         try {
+            // Remove history written by older deployments (not namespaced by contract).
+            localStorage.removeItem("certichain_issued_history");
             const raw = localStorage.getItem(HISTORY_STORAGE_KEY);
             if (raw) {
                 setHistoryList(JSON.parse(raw));
@@ -331,6 +374,36 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
             console.error("Failed to load history", e);
         }
     }, []);
+
+    // Load the on-chain issuance fee so the form shows the exact cost.
+    useEffect(() => {
+        let active = true;
+        getReadContract()
+            .then(c => c.issuanceFee())
+            .then(fee => {
+                if (active) setIssuanceFee(fee);
+            })
+            .catch(() => {
+                if (active) setIssuanceFee(0n);
+            });
+        return () => {
+            active = false;
+        };
+    }, []);
+
+    function handleClearHistory() {
+        setHistoryList([]);
+        try {
+            localStorage.removeItem(HISTORY_STORAGE_KEY);
+        } catch (e) {
+            console.error("Failed to clear history", e);
+        }
+        showToast({
+            type: "success",
+            title: "History Cleared",
+            message: "Local certificate history has been cleared."
+        });
+    }
 
     // Generate random Certificate ID helper
     function generateId() {
@@ -378,10 +451,20 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
             });
 
             const contract = await getWriteContract();
+            await assertAuthorizedIssuer(contract);
+
+            let fee = 0n;
+            try {
+                fee = await contract.issuanceFee();
+                setIssuanceFee(fee);
+            } catch {
+                // Older contract without an issuance fee.
+            }
 
             const tx = await contract.issueCertificate(
                 metadata.certificateId,
-                dataHash
+                dataHash,
+                { value: fee }
             );
 
             showToast({
@@ -432,7 +515,7 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
             showToast({
                 type: "error",
                 title: "Issuance Failed",
-                message: error.shortMessage || error.reason || error.message || "Failed to issue certificate"
+                message: describeContractError(error) || "Failed to issue certificate"
             });
         } finally {
             setBusy(false);
@@ -453,6 +536,7 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
             });
 
             const contract = await getWriteContract();
+            await assertAuthorizedIssuer(contract);
             const tx = await contract.revokeCertificate(revokeId.trim());
 
             showToast({
@@ -475,7 +559,7 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
             showToast({
                 type: "error",
                 title: "Revocation Failed",
-                message: error.shortMessage || error.reason || error.message || "Revocation failed"
+                message: describeContractError(error) || "Revocation failed"
             });
         } finally {
             setBusy(false);
@@ -663,6 +747,25 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
                                 </div>
                             </div>
 
+                            <div
+                                style={{
+                                    display: "flex",
+                                    justifyContent: "space-between",
+                                    alignItems: "center",
+                                    marginTop: "16px",
+                                    padding: "10px 12px",
+                                    borderRadius: "8px",
+                                    background: "rgba(56, 189, 248, 0.08)",
+                                    border: "1px solid rgba(56, 189, 248, 0.2)",
+                                    fontSize: "13px"
+                                }}
+                            >
+                                <span style={{ color: "#94a3b8" }}>Issuance fee (paid to university)</span>
+                                <strong style={{ color: "#38bdf8" }}>
+                                    {issuanceFee === null ? "Loading..." : `${ethers.formatEther(issuanceFee)} ETH`}
+                                </strong>
+                            </div>
+
                             <button
                                 type="submit"
                                 className="btn btn-primary btn-block"
@@ -811,6 +914,11 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
                                 <p>Certificates minted from this browser session</p>
                             </div>
                         </div>
+                        {historyList.length > 0 && (
+                            <button className="btn btn-secondary btn-sm" onClick={handleClearHistory}>
+                                <Trash2 size={14} /> Clear History
+                            </button>
+                        )}
                     </div>
 
                     {historyList.length === 0 ? (
@@ -1312,6 +1420,7 @@ function VerifyPage({ showToast }) {
 export default function App() {
     const [account, setAccount] = useState("");
     const [isOwner, setIsOwner] = useState(false);
+    const [isIssuer, setIsIssuer] = useState(false);
     const [networkInfo, setNetworkInfo] = useState({
         chainId: null,
         isCorrectNetwork: true
@@ -1351,15 +1460,19 @@ export default function App() {
                     const activeAccount = accounts[0];
                     setAccount(activeAccount);
 
-                    // Check if owner
+                    // Check owner / authorized issuer role
                     try {
                         const contract = await getReadContract();
-                        const contractOwner = await contract.owner();
+                        const [contractOwner, authorized] = await Promise.all([
+                            contract.owner(),
+                            contract.isIssuer(activeAccount).catch(() => false)
+                        ]);
                         if (mounted) {
                             setIsOwner(contractOwner.toLowerCase() === activeAccount.toLowerCase());
+                            setIsIssuer(Boolean(authorized));
                         }
                     } catch (e) {
-                        console.warn("Could not fetch owner", e);
+                        console.warn("Could not fetch roles", e);
                     }
                 }
 
@@ -1368,11 +1481,17 @@ export default function App() {
                     if (newAccounts.length === 0) {
                         setAccount("");
                         setIsOwner(false);
+                        setIsIssuer(false);
                     } else {
                         setAccount(newAccounts[0]);
-                        // Re-check owner
-                        getReadContract().then(c => c.owner()).then(o => {
+                        // Re-check owner / issuer role
+                        getReadContract().then(async (c) => {
+                            const [o, authorized] = await Promise.all([
+                                c.owner(),
+                                c.isIssuer(newAccounts[0]).catch(() => false)
+                            ]);
                             setIsOwner(o.toLowerCase() === newAccounts[0].toLowerCase());
+                            setIsIssuer(Boolean(authorized));
                         }).catch(() => {});
                     }
                 });
@@ -1422,8 +1541,12 @@ export default function App() {
 
                 try {
                     const contract = await getReadContract();
-                    const contractOwner = await contract.owner();
+                    const [contractOwner, authorized] = await Promise.all([
+                        contract.owner(),
+                        contract.isIssuer(accounts[0]).catch(() => false)
+                    ]);
                     setIsOwner(contractOwner.toLowerCase() === accounts[0].toLowerCase());
+                    setIsIssuer(Boolean(authorized));
                 } catch {
                     // ignore
                 }
@@ -1451,6 +1574,7 @@ export default function App() {
                     account={account}
                     onConnect={handleConnect}
                     isOwner={isOwner}
+                    isIssuer={isIssuer}
                     networkInfo={networkInfo}
                     onSwitchNetwork={requestSwitchToGanache}
                 />
