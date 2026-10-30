@@ -43,6 +43,20 @@ function getMetadataKey(id) {
     return `certichain_${STORAGE_NAMESPACE}_${id.trim()}`;
 }
 const HISTORY_STORAGE_KEY = `certichain_issued_history_${STORAGE_NAMESPACE}`;
+const HIDDEN_HISTORY_KEY = `certichain_hidden_history_${STORAGE_NAMESPACE}`;
+
+function getHiddenHistoryIds() {
+    try {
+        const raw = localStorage.getItem(HIDDEN_HISTORY_KEY);
+        return new Set(raw ? JSON.parse(raw) : []);
+    } catch {
+        return new Set();
+    }
+}
+
+function saveHiddenHistoryIds(ids) {
+    localStorage.setItem(HIDDEN_HISTORY_KEY, JSON.stringify([...ids]));
+}
 
 // Helper for verification URL (robust for localhost, LAN, and __KALI_IP__)
 function generateVerificationUrl(metadata) {
@@ -256,13 +270,29 @@ function Navbar({ account, onConnect, isOwner, isIssuer, networkInfo, onSwitchNe
         ? `${account.substring(0, 6)}...${account.substring(account.length - 4)}`
         : "";
 
-    function clearCache() {
-        if (!window.confirm("Clear all locally cached CertiChain data? This does not affect the blockchain.")) {
+    async function clearCache() {
+        if (!window.confirm("Clear all locally cached CertiChain data? On-chain certificate history will reappear from the blockchain; use Clear History in the history tab to hide it.")) {
             return;
         }
+
         try {
+            // First, get all current issued IDs from the chain and add them to hidden history.
+            // This ensures that after clearing local storage, syncHistoryFromChain() will
+            // respect the hidden IDs and the history tab will be empty.
+            const contract = await getReadContract();
+            const logs = await contract.queryFilter(
+                contract.filters.CertificateIssued(),
+                0,
+                "latest"
+            );
+            const allIssuedIds = new Set(logs.map(log => log.args.certificateId));
+            const hidden = getHiddenHistoryIds();
+            allIssuedIds.forEach(id => hidden.add(id));
+            saveHiddenHistoryIds(hidden);
+
+            // Now, clear all other certichain_ keys from localStorage.
             Object.keys(localStorage)
-                .filter(key => key.startsWith("certichain_"))
+                .filter(key => key.startsWith("certichain_") && key !== HIDDEN_HISTORY_KEY)
                 .forEach(key => localStorage.removeItem(key));
         } catch (error) {
             console.warn("Could not clear cache", error);
@@ -399,7 +429,80 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
 
     const navigate = useNavigate();
 
-    // Load recent certificates history from localStorage
+    async function syncHistoryFromChain() {
+        try {
+            const contract = await getReadContract();
+            const logs = await contract.queryFilter(
+                contract.filters.CertificateIssued(),
+                0,
+                "latest"
+            );
+
+            const latestById = new Map();
+            logs.forEach(log => latestById.set(log.args.certificateId, log));
+
+            const hidden = getHiddenHistoryIds();
+            const chainRecords = [];
+
+            for (const [id, log] of latestById) {
+                if (hidden.has(id)) continue;
+
+                const result = await contract.verifyCertificate(id);
+                let meta = null;
+                try {
+                    meta = JSON.parse(result.metadata);
+                } catch {
+                    meta = null;
+                }
+
+                const finalMeta = {
+                    certificateId: id,
+                    studentName: "Unknown Student",
+                    studentId: "-",
+                    program: "-",
+                    institution: "-",
+                    year: "-",
+                    ...(meta || {})
+                };
+
+                chainRecords.push({
+                    ...finalMeta,
+                    certificateId: id,
+                    dataHash: result.dataHash,
+                    txHash: log.transactionHash,
+                    verificationUrl: generateVerificationUrl(finalMeta),
+                    issuedAt: Number(result.issuedAt) * 1000 || Date.now(),
+                    revoked: result.revoked
+                });
+            }
+
+            chainRecords.sort((a, b) => b.issuedAt - a.issuedAt);
+
+            setHistoryList(prev => {
+                const hiddenNow = getHiddenHistoryIds();
+                const visibleChainRecords = chainRecords.filter(
+                    r => !hiddenNow.has(r.certificateId)
+                );
+                const chainIds = new Set(visibleChainRecords.map(r => r.certificateId));
+                const localOnly = prev.filter(
+                    r => !chainIds.has(r.certificateId) && !hiddenNow.has(r.certificateId)
+                );
+                const merged = [...visibleChainRecords, ...localOnly]
+                    .sort((a, b) => b.issuedAt - a.issuedAt)
+                    .slice(0, 50);
+                try {
+                    localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(merged));
+                } catch (err) {
+                    console.warn("Storage full", err);
+                }
+                return merged;
+            });
+        } catch (e) {
+            console.warn("Could not sync history from chain", e);
+        }
+    }
+
+    // Load local history, then merge in certificates recorded on this contract.
     useEffect(() => {
         try {
             // Remove history written by older deployments (not namespaced by contract).
@@ -411,6 +514,7 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
         } catch (e) {
             console.error("Failed to load history", e);
         }
+        syncHistoryFromChain();
     }, []);
 
     // Load the on-chain issuance fee so the form shows the exact cost.
@@ -429,21 +533,45 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
         };
     }, []);
 
-    function handleClearHistory() {
-        setHistoryList([]);
+    async function handleClearHistory() {
         try {
+            const hidden = getHiddenHistoryIds();
+
+            // Add current history items to the hidden set
+            historyList.forEach(record => hidden.add(record.certificateId));
+
+            // Also query the chain for any newly issued certificates that might not be in our
+            // current historyList, and add them to the hidden set as well.
+            const contract = await getReadContract();
+            const logs = await contract.queryFilter(
+                contract.filters.CertificateIssued(),
+                0,
+                "latest"
+            );
+            logs.forEach(log => hidden.add(log.args.certificateId));
+
+            saveHiddenHistoryIds(hidden);
             localStorage.removeItem(HISTORY_STORAGE_KEY);
         } catch (e) {
             console.error("Failed to clear history", e);
         }
+        setHistoryList([]);
         showToast({
             type: "success",
             title: "History Cleared",
-            message: "Local certificate history has been cleared."
+            message: "Certificates are hidden from history in this browser."
         });
     }
 
     function saveHistoryRecord(record) {
+        try {
+            const hidden = getHiddenHistoryIds();
+            if (hidden.delete(record.certificateId)) {
+                saveHiddenHistoryIds(hidden);
+            }
+        } catch (e) {
+            console.warn("Could not update hidden history", e);
+        }
         setHistoryList(prev => {
             const updatedHistory = [
                 record,
@@ -513,6 +641,25 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
 
             const contract = await getWriteContract();
             await assertAuthorizedIssuer(contract);
+
+            // Preflight the ID so the user gets a precise reason instead of a generic revert.
+            let existingCertificate = null;
+            try {
+                existingCertificate = await contract.verifyCertificate(metadata.certificateId);
+            } catch {
+                existingCertificate = null;
+            }
+            if (existingCertificate?.exists) {
+                throw new Error(
+                    `Certificate ID "${metadata.certificateId}" already exists on-chain. Use a different ID.`
+                );
+            }
+            if (existingCertificate?.pending) {
+                throw new Error(
+                    `Certificate ID "${metadata.certificateId}" already has a pending payment request. ` +
+                    "Use a different ID or cancel the pending request first."
+                );
+            }
 
             if (studentPays) {
                 const trimmedStudentWallet = studentWallet.trim();
@@ -1337,7 +1484,7 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
                             </div>
                             <div>
                                 <h3>Issued Certificates History</h3>
-                                <p>Certificates minted from this browser session</p>
+                                <p>Certificates recorded on this contract (synced from the blockchain)</p>
                             </div>
                         </div>
                         {historyList.length > 0 && (
