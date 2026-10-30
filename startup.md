@@ -75,7 +75,7 @@ By default there is **no certificate fee** — issuers only pay gas.
 
 To make the student pay:
 1. In **Issue Certificate**, enable **Require student to pay & claim**.
-2. Enter the student wallet (required) and the claim fee.
+2. Optionally set the student wallet (leave blank so any wallet can claim) and the claim fee.
 3. Submit to create a pending request.
 4. Student opens the **Claim** tab, enters the Certificate ID, and clicks **Pay & Claim**.
 5. The claim fee is sent directly to the issuer account that created the request.

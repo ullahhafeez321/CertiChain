@@ -443,6 +443,21 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
         });
     }
 
+    function saveHistoryRecord(record) {
+        setHistoryList(prev => {
+            const updatedHistory = [
+                record,
+                ...prev.filter(h => h.certificateId !== record.certificateId)
+            ].slice(0, 50);
+            try {
+                localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(updatedHistory));
+            } catch (err) {
+                console.warn("Storage full", err);
+            }
+            return updatedHistory;
+        });
+    }
+
     // Generate random Certificate ID helper
     function generateId() {
         const rand = Math.floor(1000 + Math.random() * 9000);
@@ -500,13 +515,11 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
             await assertAuthorizedIssuer(contract);
 
             if (studentPays) {
-                if (!studentWallet.trim()) {
-                    throw new Error("Student wallet address is required when the student must pay.");
-                }
-                if (!ethers.isAddress(studentWallet.trim())) {
+                const trimmedStudentWallet = studentWallet.trim();
+                if (trimmedStudentWallet && !ethers.isAddress(trimmedStudentWallet)) {
                     throw new Error("Invalid student wallet address.");
                 }
-                const studentAddress = studentWallet.trim();
+                const studentAddress = trimmedStudentWallet || ethers.ZeroAddress;
 
                 let claimFee = 0n;
                 try {
@@ -585,13 +598,7 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
             };
 
             // Update history list in storage
-            const updatedHistory = [record, ...historyList.filter(h => h.certificateId !== record.certificateId)];
-            setHistoryList(updatedHistory);
-            try {
-                localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(updatedHistory.slice(0, 50)));
-            } catch (err) {
-                console.warn("Storage full", err);
-            }
+            saveHistoryRecord(record);
 
             // Set state to trigger the modal safely (NO SCOPE ERRORS!)
             setIssuedCert(record);
@@ -681,7 +688,8 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
                 claimFee: result.claimFee,
                 pending: result.pending,
                 exists: result.exists,
-                revoked: result.revoked
+                revoked: result.revoked,
+                metadata: result.metadata
             });
         } catch (error) {
             console.error("Claim lookup error", error);
@@ -727,9 +735,49 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
                 message: "Awaiting blockchain confirmation..."
             });
 
-            await tx.wait();
+            const receipt = await tx.wait();
+
+            let claimMetadata = null;
+            if (claimRequest.metadata) {
+                try {
+                    claimMetadata = JSON.parse(claimRequest.metadata);
+                } catch (e) {
+                    console.warn("Failed to parse claim metadata", e);
+                }
+            }
+            if (!claimMetadata) {
+                try {
+                    const saved = localStorage.getItem(getMetadataKey(claimRequest.certificateId));
+                    if (saved) claimMetadata = JSON.parse(saved);
+                } catch {
+                    claimMetadata = null;
+                }
+            }
+
+            const finalMetadata = {
+                certificateId: claimRequest.certificateId,
+                studentName: "Unknown Student",
+                studentId: "-",
+                program: "-",
+                institution: "-",
+                year: "-",
+                ...(claimMetadata || {})
+            };
+
+            const record = {
+                ...finalMetadata,
+                dataHash: claimRequest.dataHash,
+                txHash: receipt.hash || tx.hash,
+                verificationUrl: generateVerificationUrl(finalMetadata),
+                claimedBy: signerAddress,
+                issuedAt: Date.now()
+            };
+
+            localStorage.setItem(getMetadataKey(claimRequest.certificateId), JSON.stringify(finalMetadata));
+            saveHistoryRecord(record);
 
             setClaimRequest(current => current ? { ...current, pending: false, exists: true } : current);
+            setIssuedCert(record);
 
             showToast({
                 type: "success",
@@ -963,8 +1011,11 @@ function Dashboard({ account, onConnect, isOwner, networkInfo, onSwitchNetwork, 
                                                 type="text"
                                                 value={studentWallet}
                                                 onChange={e => setStudentWallet(e.target.value)}
-                                                placeholder="0x... (blank = any wallet)"
+                                                placeholder="0x... (blank = any wallet can claim)"
                                             />
+                                            <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+                                                Leave blank to let whichever student wallet connects and pays claim it.
+                                            </span>
                                         </div>
                                         <div className="form-group">
                                             <label>Claim Fee (ETH, paid to you as issuer)</label>

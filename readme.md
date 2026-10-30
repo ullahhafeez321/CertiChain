@@ -178,12 +178,12 @@ npx ganache --port 8545 --chainId 1337
 ### 2b. Student-Paid Certificates
 
 1. In the **Issue Certificate** tab, enable **Require student to pay & claim**.
-2. Enter the student's wallet address (required) and a **Claim Fee** in ETH.
+2. Optionally enter the student's wallet address (leave blank to let any wallet claim) and a **Claim Fee** in ETH.
 3. Submit the form. This creates a **pending** certificate request; it is not valid yet.
 4. The student goes to the **Claim** tab, enters the Certificate ID, clicks **Check**, then **Pay & Claim**.
 5. The claim fee is paid directly to the **issuer account** that created the request, and the certificate becomes valid on-chain.
 
-Only the assigned student wallet can claim the certificate.
+If a specific student wallet was set, only that wallet can claim the certificate. If left blank, whichever wallet connects and pays can claim it.
 
 ---
 
